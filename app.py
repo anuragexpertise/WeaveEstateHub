@@ -171,6 +171,7 @@ def get_sidebar(role):
 def get_breadcrumb(pathname):
     """Generate breadcrumb navigation"""
     path_map = {
+        # Admin
         '/admin-portal': 'Dashboard',
         '/cashbook': 'Cashbook',
         '/receipts': 'Receipts',
@@ -181,11 +182,54 @@ def get_breadcrumb(pathname):
         '/evaluate-pass': 'Evaluate Pass',
         '/customize': 'Customize',
         '/settings': 'Settings',
+        # Owner
+        '/owner-portal': 'Dashboard',
+        '/owner-cashbook': 'Cashbook',
+        '/payments': 'Payments',
+        '/charges': 'Charges',
+        '/owner-events': 'Events',
+        '/owner-settings': 'Settings',
+        # Vendor
+        '/vendor-portal': 'Dashboard',
+        '/vendor-cashbook': 'Cashbook',
+        '/vendor-payments': 'Payments',
+        '/vendor-charges': 'Charges',
+        '/vendor-events': 'Events',
+        '/vendor-settings': 'Settings',
+        # Security
+        '/pass-evaluation': 'Pass Evaluation',
+        '/attendance': 'Attendance',
+        '/security-events': 'Events',
+        '/security-receipt': 'New Receipt',
+        '/security-users': 'Users',
+        '/security-settings': 'Settings',
     }
     
-    items = [{"label": "Home", "href": "/admin-portal", "external_link": False}]
-    if pathname and pathname != '/admin-portal':
-        items.append({"label": path_map.get(pathname, pathname[1:].title()), "active": True})
+    # Determine home route based on pathname prefix
+    home_routes = {
+        'admin': '/admin-portal',
+        'owner': '/owner-portal',
+        'vendor': '/vendor-portal',
+        'security': '/pass-evaluation',
+    }
+    home_href = '/admin-portal'
+    for key, href in home_routes.items():
+        if pathname and key in pathname:
+            home_href = href
+            break
+    # Special paths
+    if pathname in ['/cashbook', '/receipts', '/expenses', '/enroll', '/users', '/events',
+                    '/evaluate-pass', '/customize', '/settings']:
+        home_href = '/admin-portal'
+    if pathname in ['/payments', '/charges']:
+        home_href = '/owner-portal'
+    if pathname in ['/attendance']:
+        home_href = '/pass-evaluation'
+    
+    items = [{"label": "Home", "href": home_href, "external_link": False}]
+    dashboards = ['/admin-portal', '/owner-portal', '/vendor-portal', '/pass-evaluation']
+    if pathname and pathname not in dashboards:
+        items.append({"label": path_map.get(pathname, pathname[1:].replace('-', ' ').title()), "active": True})
     
     return dbc.Breadcrumb(items=items, className="mb-4 bg-transparent p-0")
 
@@ -987,6 +1031,1089 @@ def get_settings(user_data):
         ])
     ])
 
+# ========== APARTMENT OWNER PORTAL MODULES ==========
+
+def get_owner_dashboard(user_data):
+    """Owner Dashboard: profile, QR pass, maintenance summary, events"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    apt_info = None
+    dues_total = 0.0
+    payments_total = 0.0
+    
+    if soc_id and linked_id:
+        try:
+            apt_info = query_db(
+                "SELECT * FROM apartments WHERE id = %s AND society_id = %s",
+                (linked_id, soc_id), one=True
+            )
+            # Sum of charges
+            res = query_db("""
+                SELECT COALESCE(SUM(apt_maintenance_rate * a.apartment_size), 0) as total_charges
+                FROM apt_charges_fines acf
+                JOIN apartments a ON acf.apt_id = a.id
+                WHERE acf.apt_id = %s AND acf.society_id = %s
+            """, (linked_id, soc_id), one=True)
+            dues_total = float(res['total_charges']) if res else 0.0
+            
+            # Sum of payments
+            res = query_db("""
+                SELECT COALESCE(SUM(t.amount), 0) as total_paid
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s
+                  AND acc.drcr_account = 'Cr' AND t.status = 'paid'
+            """, (linked_id, soc_id), one=True)
+            payments_total = float(res['total_paid']) if res else 0.0
+        except Exception as e:
+            print(f"Owner dashboard error: {e}")
+    
+    flat_number = apt_info['flat_number'] if apt_info else 'N/A'
+    owner_name = apt_info['owner_name'] if apt_info else user_data.get('name', 'Owner')
+    apt_size = apt_info['apartment_size'] if apt_info else 0
+    balance_due = dues_total - payments_total
+    
+    # QR data for pass
+    qr_data = f"ESTATEHUB|APT:{linked_id}|FLAT:{flat_number}|SOC:{soc_id}"
+    img = qrcode.make(qr_data, box_size=4, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    qr_b64 = base64.b64encode(buf.getvalue()).decode()
+    
+    return html.Div([
+        html.H3("Owner Dashboard", className="mb-4 fw-light"),
+        dbc.Row([
+            # Profile card
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.Div([
+                            html.Img(
+                                src=f"https://ui-avatars.com/api/?name={owner_name[:2]}&size=128&background=90EE90&color=fff",
+                                className="rounded-circle mb-3", style={"width": "90px", "height": "90px"}
+                            ),
+                            html.H5(owner_name, className="fw-bold mb-1"),
+                            html.P(f"Flat: {flat_number}", className="text-muted mb-0"),
+                            html.P(f"Size: {apt_size} sq.ft", className="text-muted small"),
+                        ], className="text-center")
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=3),
+            
+            # QR Pass
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Your Access Pass", className="text-muted mb-3 text-center"),
+                        html.Div([
+                            html.Img(src=f"data:image/png;base64,{qr_b64}",
+                                     style={"width": "160px"}, className="border p-2 rounded")
+                        ], className="text-center"),
+                        html.P("Show this QR at the gate", className="text-muted small text-center mt-2 mb-0")
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=3),
+            
+            # Financial summary
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Financial Summary", className="text-muted mb-3"),
+                        dbc.Row([
+                            dbc.Col([
+                                html.Small("Total Charges", className="text-muted d-block"),
+                                html.H5(f"₹{dues_total:,.0f}", className="text-danger fw-bold mb-0")
+                            ]),
+                            dbc.Col([
+                                html.Small("Total Paid", className="text-muted d-block"),
+                                html.H5(f"₹{payments_total:,.0f}", className="text-success fw-bold mb-0")
+                            ]),
+                        ], className="mb-3"),
+                        html.Hr(),
+                        html.Div([
+                            html.Small("Balance Due", className="text-muted d-block"),
+                            html.H4(
+                                f"₹{balance_due:,.0f}",
+                                className=f"fw-bold mb-0 text-{'danger' if balance_due > 0 else 'success'}"
+                            )
+                        ])
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=6),
+        ], className="g-3 mb-4"),
+        
+        # Events preview
+        dbc.Card([
+            dbc.CardHeader(html.H5("Events & Announcements", className="mb-0")),
+            dbc.CardBody([
+                html.P("No upcoming events or announcements.", className="text-muted text-center mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_owner_cashbook(user_data):
+    """Owner Cashbook: charges, fines, payments with running balance"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            # Get charges
+            charges = query_db("""
+                SELECT acf.start_date as date, 
+                       'Maintenance Charge' as description,
+                       (acf.apt_maintenance_rate * a.apartment_size) as charge,
+                       0 as payment
+                FROM apt_charges_fines acf
+                JOIN apartments a ON acf.apt_id = a.id
+                WHERE acf.apt_id = %s AND acf.society_id = %s
+                ORDER BY acf.start_date
+            """, (linked_id, soc_id))
+            
+            # Get fines
+            fines = query_db("""
+                SELECT start_date as date,
+                       'Late Fee / Fine' as description,
+                       (apt_fine + apt_delay_fine) as charge,
+                       0 as payment
+                FROM apt_charges_fines
+                WHERE apt_id = %s AND society_id = %s AND (apt_fine > 0 OR apt_delay_fine > 0)
+                ORDER BY start_date
+            """, (linked_id, soc_id))
+            
+            # Get payments
+            payments = query_db("""
+                SELECT t.trx_date as date,
+                       COALESCE(t.acc_particulars, 'Payment') as description,
+                       0 as charge,
+                       t.amount as payment
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s
+                  AND acc.drcr_account = 'Cr' AND t.status = 'paid'
+                ORDER BY t.trx_date
+            """, (linked_id, soc_id))
+            
+            # Combine and sort
+            all_entries = []
+            for c in charges:
+                all_entries.append((c['date'], c['description'], float(c['charge']), 0.0))
+            for f in fines:
+                all_entries.append((f['date'], f['description'], float(f['charge']), 0.0))
+            for p in payments:
+                all_entries.append((p['date'], p['description'], 0.0, float(p['payment'])))
+            
+            all_entries.sort(key=lambda x: x[0] if x[0] else datetime.date.min)
+            
+            running = 0.0
+            for dt, desc, charge, payment in all_entries:
+                running += charge - payment
+                rows.append(html.Tr([
+                    html.Td(str(dt) if dt else '-'),
+                    html.Td(desc),
+                    html.Td(f"₹{charge:,.2f}" if charge > 0 else '-', className="text-danger" if charge > 0 else ""),
+                    html.Td(f"₹{payment:,.2f}" if payment > 0 else '-', className="text-success" if payment > 0 else ""),
+                    html.Td(f"₹{running:,.2f}", className=f"fw-bold text-{'danger' if running > 0 else 'success'}")
+                ]))
+        except Exception as e:
+            print(f"Owner cashbook error: {e}")
+    
+    return html.Div([
+        html.H3("Charges & Payment History", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Date"), html.Th("Description"),
+                        html.Th("Charge (Dr)"), html.Th("Payment (Cr)"), html.Th("Balance")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No records found.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_owner_payments(user_data):
+    """Owner Payments: payment history"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            payments = query_db("""
+                SELECT t.trx_date, COALESCE(t.acc_particulars, 'Payment') as description,
+                       t.status, t.amount, t.mode
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s AND acc.drcr_account = 'Cr'
+                ORDER BY t.trx_date DESC
+            """, (linked_id, soc_id))
+            
+            for p in payments:
+                rows.append(html.Tr([
+                    html.Td(str(p['trx_date'])),
+                    html.Td(p['description']),
+                    html.Td(dbc.Badge(p['status'], color="success" if p['status'] == 'paid' else "warning")),
+                    html.Td(p['mode'] or '-', className="text-capitalize"),
+                    html.Td(f"₹{float(p['amount']):,.2f}", className="fw-bold text-success")
+                ]))
+        except Exception as e:
+            print(f"Owner payments error: {e}")
+    
+    return html.Div([
+        html.H3("Payment History", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Date"), html.Th("Description"), html.Th("Status"),
+                        html.Th("Mode"), html.Th("Amount")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No payments found.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_owner_charges(user_data):
+    """Owner Charges: all maintenance charges and fines"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            charges = query_db("""
+                SELECT acf.start_date, acf.end_date,
+                       acf.apt_maintenance_rate, a.apartment_size,
+                       (acf.apt_maintenance_rate * a.apartment_size) as total_charge,
+                       acf.apt_fine, acf.apt_delay_fine, acf.apt_due_day,
+                       acf.apt_status
+                FROM apt_charges_fines acf
+                JOIN apartments a ON acf.apt_id = a.id
+                WHERE acf.apt_id = %s AND acf.society_id = %s
+                ORDER BY acf.start_date DESC
+            """, (linked_id, soc_id))
+            
+            for c in charges:
+                total = float(c['total_charge']) if c['total_charge'] else 0
+                fine = float(c['apt_fine'] or 0) + float(c['apt_delay_fine'] or 0)
+                grand = total + fine
+                
+                rows.append(html.Tr([
+                    html.Td(f"{c['start_date']} to {c['end_date']}" if c['end_date'] else str(c['start_date'])),
+                    html.Td(f"₹{float(c['apt_maintenance_rate'] or 0):.2f}/sqft x {c['apartment_size']} sqft"),
+                    html.Td(f"₹{total:,.2f}"),
+                    html.Td(f"₹{fine:,.2f}" if fine > 0 else '-', className="text-danger" if fine > 0 else ""),
+                    html.Td(f"₹{grand:,.2f}", className="fw-bold"),
+                    html.Td(
+                        dbc.Badge("Paid", color="success") if c['apt_status'] else dbc.Badge("Due", color="danger")
+                    )
+                ]))
+        except Exception as e:
+            print(f"Owner charges error: {e}")
+    
+    return html.Div([
+        html.H3("Maintenance Charges", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Period"), html.Th("Rate Calculation"),
+                        html.Th("Maintenance"), html.Th("Fine"),
+                        html.Th("Total"), html.Th("Status")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No charges found.", colSpan=6, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_owner_events(user_data):
+    """Owner Events: view society announcements"""
+    return html.Div([
+        html.H3("Events & Announcements", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                html.P("No upcoming events or announcements for apartment owners.", className="text-muted text-center mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_owner_settings(user_data):
+    """Owner Settings: update profile and password"""
+    return html.Div([
+        html.H3("Personal Settings", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Img(
+                                src=f"https://ui-avatars.com/api/?name={user_data.get('name','U')[:2]}&size=128&background=90EE90&color=fff",
+                                className="rounded-circle mb-3", style={"width": "100px", "height": "100px"}
+                            ),
+                            html.P("Update Profile Picture", className="small text-muted"),
+                            dcc.Upload(
+                                id="owner-upload-avatar",
+                                children=dbc.Button("Upload Photo", color="outline-success", size="sm"),
+                            )
+                        ], className="text-center")
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Phone Number"),
+                        dbc.Input(id="owner-phone", placeholder="+91-XXXXXXXXXX", className="mb-3"),
+                        dbc.Label("Email (read-only)"),
+                        dbc.Input(value=user_data.get('email', ''), disabled=True, className="mb-3"),
+                    ], width=8)
+                ], className="mb-4"),
+                html.Hr(),
+                html.H5("Change Password", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Current Password"),
+                        dbc.Input(id="owner-current-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("New Password"),
+                        dbc.Input(id="owner-new-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Confirm New Password"),
+                        dbc.Input(id="owner-confirm-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                ]),
+                dbc.Button("Save Changes", id="owner-save-settings", color="success")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+# ========== VENDOR PORTAL MODULES ==========
+
+def get_vendor_dashboard(user_data):
+    """Vendor Dashboard: service info, QR pass, payment summary"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    vendor_info = None
+    charges_total = 0.0
+    payments_total = 0.0
+    
+    if soc_id and linked_id:
+        try:
+            vendor_info = query_db(
+                "SELECT * FROM vendors WHERE id = %s AND society_id = %s",
+                (linked_id, soc_id), one=True
+            )
+            # Charges
+            res = query_db("""
+                SELECT COALESCE(SUM(vendor_1day + vendor_7day + vendor_1mth + vendor_fine), 0) as total
+                FROM ven_charges_fines
+                WHERE ven_id = %s AND society_id = %s
+            """, (linked_id, soc_id), one=True)
+            charges_total = float(res['total']) if res else 0.0
+            
+            # Payments
+            res = query_db("""
+                SELECT COALESCE(SUM(t.amount), 0) as total
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s
+                  AND acc.drcr_account = 'Cr' AND t.status = 'paid'
+            """, (linked_id, soc_id), one=True)
+            payments_total = float(res['total']) if res else 0.0
+        except Exception as e:
+            print(f"Vendor dashboard error: {e}")
+    
+    v_name = vendor_info['name'] if vendor_info else user_data.get('name', 'Vendor')
+    v_service = vendor_info['service_type'] if vendor_info else 'N/A'
+    v_phone = vendor_info['mobile'] if vendor_info else '-'
+    balance_due = charges_total - payments_total
+    
+    # QR
+    qr_data = f"ESTATEHUB|VEN:{linked_id}|SVC:{v_service}|SOC:{soc_id}"
+    img = qrcode.make(qr_data, box_size=4, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    qr_b64 = base64.b64encode(buf.getvalue()).decode()
+    
+    return html.Div([
+        html.H3("Vendor Dashboard", className="mb-4 fw-light"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.Div([
+                            html.Img(
+                                src=f"https://ui-avatars.com/api/?name={v_name[:2]}&size=128&background=FFD700&color=333",
+                                className="rounded-circle mb-3", style={"width": "90px", "height": "90px"}
+                            ),
+                            html.H5(v_name, className="fw-bold mb-1"),
+                            html.P(f"Service: {v_service}", className="text-muted mb-0"),
+                            html.P(f"Phone: {v_phone}", className="text-muted small"),
+                        ], className="text-center")
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=3),
+            
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Vendor Pass (QR)", className="text-muted mb-3 text-center"),
+                        html.Div([
+                            html.Img(src=f"data:image/png;base64,{qr_b64}",
+                                     style={"width": "160px"}, className="border p-2 rounded")
+                        ], className="text-center"),
+                        html.P("Show this QR at the gate", className="text-muted small text-center mt-2 mb-0")
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=3),
+            
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Financial Summary", className="text-muted mb-3"),
+                        dbc.Row([
+                            dbc.Col([
+                                html.Small("Total Charges", className="text-muted d-block"),
+                                html.H5(f"₹{charges_total:,.0f}", className="text-danger fw-bold mb-0")
+                            ]),
+                            dbc.Col([
+                                html.Small("Total Paid", className="text-muted d-block"),
+                                html.H5(f"₹{payments_total:,.0f}", className="text-success fw-bold mb-0")
+                            ]),
+                        ], className="mb-3"),
+                        html.Hr(),
+                        html.Div([
+                            html.Small("Balance Due", className="text-muted d-block"),
+                            html.H4(f"₹{balance_due:,.0f}",
+                                     className=f"fw-bold mb-0 text-{'danger' if balance_due > 0 else 'success'}")
+                        ])
+                    ])
+                ], className="shadow-sm h-100")
+            ], width=6),
+        ], className="g-3 mb-4"),
+        
+        dbc.Card([
+            dbc.CardHeader(html.H5("Events & Announcements", className="mb-0")),
+            dbc.CardBody([
+                html.P("No upcoming events or announcements.", className="text-muted text-center mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_vendor_cashbook(user_data):
+    """Vendor Cashbook: pass charges, fines, payments with running balance"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            charges = query_db("""
+                SELECT start_date as date,
+                       vendor_1day, vendor_7day, vendor_1mth, vendor_fine, ven_status
+                FROM ven_charges_fines
+                WHERE ven_id = %s AND society_id = %s
+                ORDER BY start_date
+            """, (linked_id, soc_id))
+            
+            payments = query_db("""
+                SELECT t.trx_date as date, COALESCE(t.acc_particulars, 'Payment') as description,
+                       t.amount
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s
+                  AND acc.drcr_account = 'Cr' AND t.status = 'paid'
+                ORDER BY t.trx_date
+            """, (linked_id, soc_id))
+            
+            all_entries = []
+            for c in charges:
+                total_charge = float(c['vendor_1day'] or 0) + float(c['vendor_7day'] or 0) + float(c['vendor_1mth'] or 0)
+                fine = float(c['vendor_fine'] or 0)
+                if total_charge > 0:
+                    all_entries.append((c['date'], 'Pass Charge', total_charge, 0.0))
+                if fine > 0:
+                    all_entries.append((c['date'], 'Fine', fine, 0.0))
+            for p in payments:
+                all_entries.append((p['date'], p['description'], 0.0, float(p['amount'])))
+            
+            all_entries.sort(key=lambda x: x[0] if x[0] else datetime.date.min)
+            
+            running = 0.0
+            for dt, desc, charge, payment in all_entries:
+                running += charge - payment
+                rows.append(html.Tr([
+                    html.Td(str(dt) if dt else '-'),
+                    html.Td(desc),
+                    html.Td(f"₹{charge:,.2f}" if charge > 0 else '-', className="text-danger" if charge > 0 else ""),
+                    html.Td(f"₹{payment:,.2f}" if payment > 0 else '-', className="text-success" if payment > 0 else ""),
+                    html.Td(f"₹{running:,.2f}", className=f"fw-bold text-{'danger' if running > 0 else 'success'}")
+                ]))
+        except Exception as e:
+            print(f"Vendor cashbook error: {e}")
+    
+    return html.Div([
+        html.H3("Charges & Payment History", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Date"), html.Th("Description"),
+                        html.Th("Charge (Dr)"), html.Th("Payment (Cr)"), html.Th("Balance")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No records found.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_vendor_payments(user_data):
+    """Vendor Payments: pass purchase history"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            payments = query_db("""
+                SELECT t.trx_date, COALESCE(t.acc_particulars, 'Payment') as description,
+                       t.status, t.amount, t.mode
+                FROM transactions t
+                JOIN accounts acc ON t.acc_id = acc.id
+                WHERE t.entity_id = %s AND t.society_id = %s AND acc.drcr_account = 'Cr'
+                ORDER BY t.trx_date DESC
+            """, (linked_id, soc_id))
+            
+            for p in payments:
+                rows.append(html.Tr([
+                    html.Td(str(p['trx_date'])),
+                    html.Td(p['description']),
+                    html.Td(dbc.Badge(p['status'], color="success" if p['status'] == 'paid' else "warning")),
+                    html.Td(f"₹{float(p['amount']):,.2f}", className="fw-bold text-success")
+                ]))
+        except Exception as e:
+            print(f"Vendor payments error: {e}")
+    
+    return html.Div([
+        html.H3("Payment History", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Date"), html.Th("Description"),
+                        html.Th("Status"), html.Th("Amount")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No payments found.", colSpan=4, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_vendor_charges(user_data):
+    """Vendor Charges: pass fees & fines"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    rows = []
+    if soc_id and linked_id:
+        try:
+            charges = query_db("""
+                SELECT start_date, end_date,
+                       vendor_1day, vendor_7day, vendor_1mth, vendor_fine, ven_status
+                FROM ven_charges_fines
+                WHERE ven_id = %s AND society_id = %s
+                ORDER BY start_date DESC
+            """, (linked_id, soc_id))
+            
+            for c in charges:
+                desc_parts = []
+                if float(c['vendor_1day'] or 0) > 0:
+                    desc_parts.append(f"1-Day Pass Fee: ₹{float(c['vendor_1day']):.0f}")
+                if float(c['vendor_7day'] or 0) > 0:
+                    desc_parts.append(f"7-Day Pass Fee: ₹{float(c['vendor_7day']):.0f}")
+                if float(c['vendor_1mth'] or 0) > 0:
+                    desc_parts.append(f"1-Month Pass Fee: ₹{float(c['vendor_1mth']):.0f}")
+                desc = ', '.join(desc_parts) if desc_parts else 'Pass Charge'
+                
+                total = float(c['vendor_1day'] or 0) + float(c['vendor_7day'] or 0) + float(c['vendor_1mth'] or 0)
+                fine = float(c['vendor_fine'] or 0)
+                
+                rows.append(html.Tr([
+                    html.Td(f"{c['start_date']} to {c['end_date']}" if c['end_date'] else str(c['start_date'])),
+                    html.Td(desc),
+                    html.Td(f"₹{fine:,.2f}" if fine > 0 else '-', className="text-danger" if fine > 0 else ""),
+                    html.Td(f"₹{total + fine:,.2f}", className="fw-bold"),
+                    html.Td(
+                        dbc.Badge("Paid", color="success") if c['ven_status'] else dbc.Badge("Due", color="danger")
+                    )
+                ]))
+        except Exception as e:
+            print(f"Vendor charges error: {e}")
+    
+    return html.Div([
+        html.H3("Charges to Contractor", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Period"), html.Th("Description"),
+                        html.Th("Fine"), html.Th("Total"), html.Th("Status")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No charges found.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_vendor_events(user_data):
+    """Vendor Events: view society announcements"""
+    return html.Div([
+        html.H3("Events & Announcements", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                html.P("No upcoming events or announcements for contractors.", className="text-muted text-center mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_vendor_settings(user_data):
+    """Vendor Settings: update profile and password"""
+    return html.Div([
+        html.H3("User Settings", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Img(
+                                src=f"https://ui-avatars.com/api/?name={user_data.get('name','V')[:2]}&size=128&background=FFD700&color=333",
+                                className="rounded-circle mb-3", style={"width": "100px", "height": "100px"}
+                            ),
+                            html.P("Update Profile Picture", className="small text-muted"),
+                            dcc.Upload(
+                                id="vendor-upload-avatar",
+                                children=dbc.Button("Upload Photo", color="outline-warning", size="sm"),
+                            )
+                        ], className="text-center")
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Phone Number"),
+                        dbc.Input(id="vendor-phone", placeholder="+91-XXXXXXXXXX", className="mb-3"),
+                        dbc.Label("Email (read-only)"),
+                        dbc.Input(value=user_data.get('email', ''), disabled=True, className="mb-3"),
+                    ], width=8)
+                ], className="mb-4"),
+                html.Hr(),
+                html.H5("Change Password", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Current Password"),
+                        dbc.Input(id="vendor-current-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("New Password"),
+                        dbc.Input(id="vendor-new-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Confirm New Password"),
+                        dbc.Input(id="vendor-confirm-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                ]),
+                dbc.Button("Save Changes", id="vendor-save-settings", color="success")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+# ========== SECURITY PORTAL MODULES ==========
+
+def get_security_pass_evaluation(user_data):
+    """Security Pass Evaluation: QR scanner + manual evaluation"""
+    return html.Div([
+        html.H3("Pass Evaluation", className="mb-4 fw-light"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader(html.H5("QR Code Scanner", className="mb-0")),
+                    dbc.CardBody([
+                        html.Div([
+                            html.I(className="fa fa-qrcode fa-5x text-muted mb-3"),
+                            html.P("Point camera at user's QR code to scan", className="text-muted"),
+                            dbc.Button([
+                                html.I(className="fa fa-camera me-2"),
+                                "Open Camera"
+                            ], id="open-camera-btn", color="primary", size="lg", className="mt-2")
+                        ], className="text-center p-4 border border-dashed rounded")
+                    ])
+                ], className="shadow-sm mb-3"),
+                
+                dbc.Card([
+                    dbc.CardHeader(html.H5("Manual Evaluation", className="mb-0")),
+                    dbc.CardBody([
+                        dbc.Label("Enter Entity ID or Email"),
+                        dbc.Input(id="sec-eval-entity", placeholder="e.g. 12 or user@example.com", className="mb-3"),
+                        dbc.Label("Entity Type"),
+                        dcc.Dropdown(
+                            id="sec-eval-type",
+                            options=[
+                                {"label": "Apartment Owner", "value": "apartment"},
+                                {"label": "Vendor / Contractor", "value": "vendor"},
+                            ],
+                            value="apartment",
+                            className="mb-3"
+                        ),
+                        dbc.Button([
+                            html.I(className="fa fa-search me-2"),
+                            "Evaluate"
+                        ], id="sec-evaluate-btn", color="success", className="w-100"),
+                        html.Div(id="sec-evaluation-result", className="mt-3")
+                    ])
+                ], className="shadow-sm")
+            ], width=6),
+            
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader(html.H5("Recent Evaluations", className="mb-0")),
+                    dbc.CardBody([
+                        html.Div(id="sec-recent-evals", children=[
+                            html.P("No recent evaluations.", className="text-muted text-center mb-0")
+                        ])
+                    ])
+                ], className="shadow-sm")
+            ], width=6)
+        ])
+    ])
+
+
+def get_security_attendance(user_data):
+    """Security Attendance: clock in/out and shift log"""
+    soc_id = user_data.get('society_id')
+    linked_id = user_data.get('linked_id')
+    
+    staff_info = None
+    recent_attendance = []
+    has_open_entry = False
+    
+    if soc_id and linked_id:
+        try:
+            staff_info = query_db(
+                "SELECT * FROM security_staff WHERE id = %s AND society_id = %s",
+                (linked_id, soc_id), one=True
+            )
+            # Check for open clock-in (no time_out)
+            open_entry = query_db("""
+                SELECT id, time_in FROM attendance
+                WHERE security_id = %s AND society_id = %s AND time_out IS NULL
+                ORDER BY time_in DESC LIMIT 1
+            """, (linked_id, soc_id), one=True)
+            has_open_entry = open_entry is not None
+            
+            # Recent attendance
+            recent_attendance = query_db("""
+                SELECT time_in, time_out FROM attendance
+                WHERE security_id = %s AND society_id = %s
+                ORDER BY time_in DESC LIMIT 10
+            """, (linked_id, soc_id))
+        except Exception as e:
+            print(f"Security attendance error: {e}")
+    
+    shift = staff_info['shift'] if staff_info else 'N/A'
+    salary = float(staff_info['salary_per_shift']) if staff_info and staff_info['salary_per_shift'] else 0
+    staff_name = staff_info['name'] if staff_info else user_data.get('name', 'Guard')
+    
+    attendance_rows = []
+    for a in recent_attendance:
+        t_in = a['time_in']
+        t_out = a['time_out']
+        duration = ''
+        if t_in and t_out:
+            delta = t_out - t_in
+            hours = delta.total_seconds() / 3600
+            duration = f"{hours:.1f} hrs"
+        
+        attendance_rows.append(html.Tr([
+            html.Td(str(t_in.strftime('%Y-%m-%d %H:%M')) if t_in else '-'),
+            html.Td(str(t_out.strftime('%Y-%m-%d %H:%M')) if t_out else dbc.Badge("Active", color="success")),
+            html.Td(duration or '-')
+        ]))
+    
+    return html.Div([
+        html.H3("Attendance Relay", className="mb-4 fw-light"),
+        dbc.Row([
+            # Shift info
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Assigned Shift", className="text-muted mb-3"),
+                        html.H4(shift, className="fw-bold mb-2"),
+                        html.P(f"Salary: ₹{salary:,.0f}/shift", className="text-muted"),
+                        html.P(f"Status: {'Active' if staff_info and staff_info['active'] else 'Inactive'}",
+                               className=f"text-{'success' if staff_info and staff_info['active'] else 'danger'} fw-bold"),
+                    ])
+                ], className="shadow-sm mb-3")
+            ], width=4),
+            
+            # Clock in/out
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Attendance Action", className="text-muted mb-3 text-center"),
+                        html.Div([
+                            html.P(staff_name, className="fw-bold h5 mb-3"),
+                            dbc.Button([
+                                html.I(className="fa fa-sign-out-alt me-2"),
+                                "Clock Out"
+                            ] if has_open_entry else [
+                                html.I(className="fa fa-sign-in-alt me-2"),
+                                "Clock In"
+                            ],
+                                id="sec-clock-btn",
+                                color="danger" if has_open_entry else "success",
+                                size="lg",
+                                className="w-100 py-3"
+                            ),
+                            html.P(
+                                "You are currently clocked in" if has_open_entry else "Not clocked in",
+                                className=f"mt-3 text-{'success' if has_open_entry else 'muted'} small"
+                            )
+                        ], className="text-center")
+                    ])
+                ], className="shadow-sm mb-3")
+            ], width=4),
+            
+            # Stats
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("This Month", className="text-muted mb-3"),
+                        html.Div([
+                            html.Small("Shifts Completed", className="text-muted d-block"),
+                            html.H4(str(len([a for a in recent_attendance if a['time_out']])), className="fw-bold text-primary mb-3"),
+                            html.Small("Total Earnings", className="text-muted d-block"),
+                            html.H4(f"₹{salary * len([a for a in recent_attendance if a['time_out']]):,.0f}", className="fw-bold text-success"),
+                        ])
+                    ])
+                ], className="shadow-sm mb-3")
+            ], width=4),
+        ], className="g-3 mb-4"),
+        
+        # Attendance log
+        dbc.Card([
+            dbc.CardHeader(html.H5("Recent Attendance Log", className="mb-0")),
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Clock In"), html.Th("Clock Out"), html.Th("Duration")
+                    ])),
+                    html.Tbody(attendance_rows if attendance_rows else [
+                        html.Tr([html.Td("No attendance records found.", colSpan=3, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_security_events(user_data):
+    """Security Events: view announcements"""
+    return html.Div([
+        html.H3("Events & Announcements", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                html.P("No upcoming events or announcements for security staff.", className="text-muted text-center mb-0")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_security_new_receipt(user_data):
+    """Security New Receipt: create receipts for on-demand entry"""
+    soc_id = user_data.get('society_id')
+    
+    accounts = []
+    if soc_id:
+        try:
+            accounts = query_db("SELECT id, name, header FROM accounts WHERE society_id = %s AND drcr_account = 'Cr'", (soc_id,))
+        except Exception as e:
+            print(f"Security receipt accounts error: {e}")
+    
+    account_options = [{"label": f"{a['name']} - {a['header']}", "value": a['id']} for a in accounts]
+    
+    return html.Div([
+        html.H3("Create New Receipt", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Credit Account"),
+                        dcc.Dropdown(id="sec-receipt-account", options=account_options, placeholder="Select account...", className="mb-3")
+                    ], width=12),
+                ]),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Description / Particulars"),
+                        dbc.Input(id="sec-receipt-desc", placeholder="e.g. On-demand entry fee for visitor", className="mb-3")
+                    ], width=8),
+                    dbc.Col([
+                        dbc.Label("Amount (₹)"),
+                        dbc.Input(id="sec-receipt-amount", type="number", placeholder="0.00", className="mb-3")
+                    ], width=4),
+                ]),
+                dbc.Button([
+                    html.I(className="fa fa-plus-circle me-2"),
+                    "Record Receipt"
+                ], id="sec-add-receipt-btn", color="success", size="lg", className="w-100"),
+                html.Div(id="sec-receipt-feedback", className="mt-3")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
+def get_security_users(user_data):
+    """Security Users: KPI overview of apartments, vendors, security"""
+    soc_id = user_data.get('society_id')
+    
+    stats = {
+        'apt_dues': 0, 'apt_nodues': 0, 'apt_total': 0,
+        'ven_dues': 0, 'ven_nodues': 0, 'ven_total': 0,
+        'sec_active': 0, 'sec_inactive': 0, 'sec_total': 0,
+        'pay_pending': 0, 'pay_verified': 0, 'pay_total': 0,
+    }
+    
+    if soc_id:
+        try:
+            res = query_db("SELECT count(*) as cnt FROM apartments WHERE society_id = %s AND active = TRUE", (soc_id,), one=True)
+            stats['apt_total'] = res['cnt'] if res else 0
+            res = query_db("SELECT count(DISTINCT apt_id) as cnt FROM apt_charges_fines WHERE society_id = %s AND apt_status = FALSE", (soc_id,), one=True)
+            stats['apt_dues'] = res['cnt'] if res else 0
+            stats['apt_nodues'] = stats['apt_total'] - stats['apt_dues']
+
+            res = query_db("SELECT count(*) as cnt FROM vendors WHERE society_id = %s AND active = TRUE", (soc_id,), one=True)
+            stats['ven_total'] = res['cnt'] if res else 0
+            res = query_db("SELECT count(DISTINCT ven_id) as cnt FROM ven_charges_fines WHERE society_id = %s AND ven_status = FALSE", (soc_id,), one=True)
+            stats['ven_dues'] = res['cnt'] if res else 0
+            stats['ven_nodues'] = stats['ven_total'] - stats['ven_dues']
+
+            res = query_db("SELECT count(*) as cnt FROM security_staff WHERE society_id = %s AND active = TRUE", (soc_id,), one=True)
+            stats['sec_active'] = res['cnt'] if res else 0
+            res = query_db("SELECT count(*) as cnt FROM security_staff WHERE society_id = %s AND active = FALSE", (soc_id,), one=True)
+            stats['sec_inactive'] = res['cnt'] if res else 0
+            stats['sec_total'] = stats['sec_active'] + stats['sec_inactive']
+
+            res = query_db("SELECT count(*) as cnt FROM transactions WHERE society_id = %s AND status = 'pending'", (soc_id,), one=True)
+            stats['pay_pending'] = res['cnt'] if res else 0
+            res = query_db("SELECT count(*) as cnt FROM transactions WHERE society_id = %s AND status = 'paid'", (soc_id,), one=True)
+            stats['pay_verified'] = res['cnt'] if res else 0
+            stats['pay_total'] = stats['pay_pending'] + stats['pay_verified']
+        except Exception as e:
+            print(f"Security users KPI error: {e}")
+    
+    return html.Div([
+        html.H3("Users Overview", className="mb-4 fw-light"),
+        dbc.Row([
+            dbc.Col(kpi_card("Apartment Owners", "fa-building", [
+                ("With Dues", stats['apt_dues'], "danger"),
+                ("No Dues", stats['apt_nodues'], "success"),
+                ("Total", stats['apt_total'], "primary")
+            ]), width=6),
+            dbc.Col(kpi_card("Security Staff", "fa-shield-alt", [
+                ("Inactive", stats['sec_inactive'], "danger"),
+                ("Active", stats['sec_active'], "success"),
+                ("Total", stats['sec_total'], "primary")
+            ]), width=6),
+        ], className="g-3 mb-3"),
+        dbc.Row([
+            dbc.Col(kpi_card("Utility Contractors", "fa-tools", [
+                ("With Dues", stats['ven_dues'], "danger"),
+                ("No Dues", stats['ven_nodues'], "success"),
+                ("Total", stats['ven_total'], "primary")
+            ]), width=6),
+            dbc.Col(kpi_card("Payments", "fa-credit-card", [
+                ("Pending", stats['pay_pending'], "warning"),
+                ("Verified", stats['pay_verified'], "success"),
+                ("Total", stats['pay_total'], "primary")
+            ]), width=6),
+        ], className="g-3")
+    ])
+
+
+def get_security_settings(user_data):
+    """Security Settings: update profile and password"""
+    return html.Div([
+        html.H3("User Settings", className="mb-4 fw-light"),
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Img(
+                                src=f"https://ui-avatars.com/api/?name={user_data.get('name','S')[:2]}&size=128&background=F08080&color=fff",
+                                className="rounded-circle mb-3", style={"width": "100px", "height": "100px"}
+                            ),
+                            html.P("Update Profile Picture", className="small text-muted"),
+                            dcc.Upload(
+                                id="sec-upload-avatar",
+                                children=dbc.Button("Upload Photo", color="outline-danger", size="sm"),
+                            )
+                        ], className="text-center")
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Phone Number"),
+                        dbc.Input(id="sec-phone", placeholder="+91-XXXXXXXXXX", className="mb-3"),
+                        dbc.Label("Email (read-only)"),
+                        dbc.Input(value=user_data.get('email', ''), disabled=True, className="mb-3"),
+                    ], width=8)
+                ], className="mb-4"),
+                html.Hr(),
+                html.H5("Change Password", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Label("Current Password"),
+                        dbc.Input(id="sec-current-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("New Password"),
+                        dbc.Input(id="sec-new-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                    dbc.Col([
+                        dbc.Label("Confirm New Password"),
+                        dbc.Input(id="sec-confirm-pwd", type="password", className="mb-3"),
+                    ], width=4),
+                ]),
+                dbc.Button("Save Changes", id="sec-save-settings", color="success")
+            ])
+        ], className="shadow-sm")
+    ])
+
+
 # ========== AUTHENTICATION UI ==========
 
 def get_pin_pad():
@@ -1143,7 +2270,7 @@ def display_page(pathname, session_data, auth_stage):
     if session_data:
         role = session_data.get('role')
         
-        # Route mapping
+        # Admin route mapping
         if role == 'admin':
             if pathname == '/cashbook':
                 content = get_cashbook(session_data)
@@ -1163,13 +2290,61 @@ def display_page(pathname, session_data, auth_stage):
                 content = get_customize(session_data)
             elif pathname == '/settings':
                 content = get_settings(session_data)
-            else:  # Default to dashboard
+            else:
                 content = get_admin_dashboard(session_data)
                 pathname = '/admin-portal'
+        
+        # Apartment Owner route mapping
+        elif role == 'apartment':
+            if pathname == '/owner-cashbook':
+                content = get_owner_cashbook(session_data)
+            elif pathname == '/payments':
+                content = get_owner_payments(session_data)
+            elif pathname == '/charges':
+                content = get_owner_charges(session_data)
+            elif pathname == '/owner-events':
+                content = get_owner_events(session_data)
+            elif pathname == '/owner-settings':
+                content = get_owner_settings(session_data)
+            else:
+                content = get_owner_dashboard(session_data)
+                pathname = '/owner-portal'
+        
+        # Vendor route mapping
+        elif role == 'vendor':
+            if pathname == '/vendor-cashbook':
+                content = get_vendor_cashbook(session_data)
+            elif pathname == '/vendor-payments':
+                content = get_vendor_payments(session_data)
+            elif pathname == '/vendor-charges':
+                content = get_vendor_charges(session_data)
+            elif pathname == '/vendor-events':
+                content = get_vendor_events(session_data)
+            elif pathname == '/vendor-settings':
+                content = get_vendor_settings(session_data)
+            else:
+                content = get_vendor_dashboard(session_data)
+                pathname = '/vendor-portal'
+        
+        # Security route mapping
+        elif role == 'security':
+            if pathname == '/attendance':
+                content = get_security_attendance(session_data)
+            elif pathname == '/security-events':
+                content = get_security_events(session_data)
+            elif pathname == '/security-receipt':
+                content = get_security_new_receipt(session_data)
+            elif pathname == '/security-users':
+                content = get_security_users(session_data)
+            elif pathname == '/security-settings':
+                content = get_security_settings(session_data)
+            else:
+                content = get_security_pass_evaluation(session_data)
+                pathname = '/pass-evaluation'
+        
         else:
             content = html.Div([
-                html.H4(f"Welcome to {ROLE_CONFIG[role]['label']}", className="text-center mt-5"),
-                html.P("Portal under development", className="text-center text-muted")
+                html.H4("Unknown role", className="text-center mt-5 text-danger"),
             ])
         
         return render_app_shell(session_data, content, pathname)
@@ -1346,6 +2521,8 @@ def process_login(n, email, pwd, pin, pattern, method, soc_id):
             "role": user['role'],
             "society_id": soc_id,
             "society_name": user['soc_name'],
+            "linked_id": user['linked_id'],
+            "email": email,
             "name": email.split('@')[0].capitalize()
         }
         
@@ -1395,6 +2572,136 @@ def logout(n):
     if n:
         return None, "/"
     return dash.no_update, dash.no_update
+
+# Security: Clock In/Out callback
+@app.callback(
+    Output("url", "pathname", allow_duplicate=True),
+    Input("sec-clock-btn", "n_clicks"),
+    State("user-session", "data"),
+    prevent_initial_call=True
+)
+def security_clock_action(n, session_data):
+    """Handle security staff clock in/out"""
+    if not n or not session_data:
+        return dash.no_update
+    
+    soc_id = session_data.get('society_id')
+    linked_id = session_data.get('linked_id')
+    if not soc_id or not linked_id:
+        return dash.no_update
+    
+    try:
+        # Check if there's an open clock-in
+        open_entry = query_db("""
+            SELECT id FROM attendance
+            WHERE security_id = %s AND society_id = %s AND time_out IS NULL
+            ORDER BY time_in DESC LIMIT 1
+        """, (linked_id, soc_id), one=True)
+        
+        if open_entry:
+            # Clock out
+            execute_db("""
+                UPDATE attendance SET time_out = NOW()
+                WHERE id = %s
+            """, (open_entry['id'],))
+        else:
+            # Clock in
+            execute_db("""
+                INSERT INTO attendance (society_id, security_id, time_in)
+                VALUES (%s, %s, NOW())
+            """, (soc_id, linked_id))
+    except Exception as e:
+        print(f"Clock action error: {e}")
+    
+    return "/attendance"
+
+# Security: Pass Evaluation callback
+@app.callback(
+    Output("sec-evaluation-result", "children"),
+    Input("sec-evaluate-btn", "n_clicks"),
+    State("sec-eval-entity", "value"),
+    State("sec-eval-type", "value"),
+    State("user-session", "data"),
+    prevent_initial_call=True
+)
+def evaluate_pass(n, entity_input, entity_type, session_data):
+    """Evaluate pass for an entity"""
+    if not n or not entity_input or not session_data:
+        return dash.no_update
+    
+    soc_id = session_data.get('society_id')
+    if not soc_id:
+        return dbc.Alert("No society context", color="danger")
+    
+    try:
+        if entity_type == 'apartment':
+            # Try by ID or email
+            if entity_input.isdigit():
+                apt = query_db("SELECT * FROM apartments WHERE id = %s AND society_id = %s", (int(entity_input), soc_id), one=True)
+            else:
+                user = query_db("SELECT linked_id FROM users WHERE email = %s AND society_id = %s AND role = 'apartment'", (entity_input, soc_id), one=True)
+                apt = query_db("SELECT * FROM apartments WHERE id = %s AND society_id = %s", (user['linked_id'], soc_id), one=True) if user else None
+            
+            if not apt:
+                return dbc.Alert("Apartment owner not found.", color="warning")
+            
+            # Check dues
+            dues = query_db("""
+                SELECT count(*) as cnt FROM apt_charges_fines
+                WHERE apt_id = %s AND society_id = %s AND apt_status = FALSE
+            """, (apt['id'], soc_id), one=True)
+            has_dues = dues['cnt'] > 0 if dues else False
+            
+            if has_dues:
+                return dbc.Alert([
+                    html.H4("FAIL", className="alert-heading"),
+                    html.P(f"Owner: {apt['owner_name']} | Flat: {apt['flat_number']}"),
+                    html.P(f"Reason: Outstanding dues ({dues['cnt']} unpaid charges)")
+                ], color="danger")
+            else:
+                # Log gate access
+                execute_db("INSERT INTO gate_access (society_id, role, entity_id, time_in) VALUES (%s, 'A', %s, NOW())", (soc_id, apt['id']))
+                return dbc.Alert([
+                    html.H4("PASS", className="alert-heading"),
+                    html.P(f"Owner: {apt['owner_name']} | Flat: {apt['flat_number']}"),
+                    html.P("No outstanding dues. Entry granted.")
+                ], color="success")
+        
+        elif entity_type == 'vendor':
+            if entity_input.isdigit():
+                ven = query_db("SELECT * FROM vendors WHERE id = %s AND society_id = %s", (int(entity_input), soc_id), one=True)
+            else:
+                user = query_db("SELECT linked_id FROM users WHERE email = %s AND society_id = %s AND role = 'vendor'", (entity_input, soc_id), one=True)
+                ven = query_db("SELECT * FROM vendors WHERE id = %s AND society_id = %s", (user['linked_id'], soc_id), one=True) if user else None
+            
+            if not ven:
+                return dbc.Alert("Vendor not found.", color="warning")
+            
+            dues = query_db("""
+                SELECT count(*) as cnt FROM ven_charges_fines
+                WHERE ven_id = %s AND society_id = %s AND ven_status = FALSE
+            """, (ven['id'], soc_id), one=True)
+            has_dues = dues['cnt'] > 0 if dues else False
+            
+            if has_dues:
+                return dbc.Alert([
+                    html.H4("FAIL", className="alert-heading"),
+                    html.P(f"Vendor: {ven['name']} | Service: {ven['service_type']}"),
+                    html.P(f"Reason: Outstanding dues ({dues['cnt']} unpaid charges)")
+                ], color="danger")
+            else:
+                execute_db("INSERT INTO gate_access (society_id, role, entity_id, time_in) VALUES (%s, 'V', %s, NOW())", (soc_id, ven['id']))
+                return dbc.Alert([
+                    html.H4("PASS", className="alert-heading"),
+                    html.P(f"Vendor: {ven['name']} | Service: {ven['service_type']}"),
+                    html.P("No outstanding dues. Entry granted.")
+                ], color="success")
+    
+    except Exception as e:
+        print(f"Evaluation error: {e}")
+        return dbc.Alert(f"Error: {str(e)}", color="danger")
+    
+    return dbc.Alert("Entity not found.", color="warning")
 
 # ========== RUN SERVER ==========
 
