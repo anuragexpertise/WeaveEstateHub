@@ -823,15 +823,62 @@ def get_users(user_data):
 
 # MODULE 7: Events
 def get_events(user_data):
-    """Events Module - Create and manage events"""
+    """Events Module - Create, manage, and list events (Admin)"""
     soc_id = user_data.get('society_id')
     
-    # Note: Events table doesn't exist in schema, so this is a placeholder
-    # You would need to add an events table to fully implement this
+    events_sent = []
+    events_draft = []
+    if soc_id:
+        try:
+            events_sent = query_db("""
+                SELECT id, title, description, event_date, event_time, audience, status, created_at
+                FROM events WHERE society_id = %s AND status = 'sent'
+                ORDER BY event_date DESC, event_time DESC
+            """, (soc_id,))
+            events_draft = query_db("""
+                SELECT id, title, description, event_date, event_time, audience, status, created_at
+                FROM events WHERE society_id = %s AND status = 'draft'
+                ORDER BY created_at DESC
+            """, (soc_id,))
+        except Exception as e:
+            print(f"Events query error: {e}")
+    
+    def event_rows(events, show_actions=False):
+        rows = []
+        for ev in events:
+            audience_badges = []
+            aud = ev['audience'] if ev['audience'] else []
+            role_colors = {'admin': 'primary', 'apartment': 'success', 'vendor': 'warning', 'security': 'danger'}
+            for a in aud:
+                audience_badges.append(dbc.Badge(a.title(), color=role_colors.get(a, 'secondary'), className="me-1"))
+            
+            action_cells = []
+            if show_actions:
+                action_cells = [
+                    html.Td([
+                        dbc.Button("Send", id={"type": "send-event-row", "index": ev['id']},
+                                  color="success", size="sm", className="me-1"),
+                        dbc.Button("Delete", id={"type": "delete-event-row", "index": ev['id']},
+                                  color="danger", size="sm", outline=True),
+                    ])
+                ]
+            
+            rows.append(html.Tr([
+                html.Td(ev['title'], className="fw-bold"),
+                html.Td(ev['description'][:80] + '...' if ev['description'] and len(ev['description']) > 80 else (ev['description'] or '-')),
+                html.Td(f"{ev['event_date'] or '-'} {ev['event_time'] or ''}"),
+                html.Td(audience_badges),
+                html.Td(dbc.Badge(ev['status'].title(), color="success" if ev['status'] == 'sent' else "secondary")),
+            ] + action_cells))
+        return rows
+    
+    sent_rows = event_rows(events_sent)
+    draft_rows = event_rows(events_draft, show_actions=True)
     
     return html.Div([
         html.H3("Events & Announcements", className="mb-4 fw-light"),
         
+        # Create form
         dbc.Card([
             dbc.CardHeader(html.H5("Create New Event", className="mb-0")),
             dbc.CardBody([
@@ -873,17 +920,45 @@ def get_events(user_data):
                 ], className="mb-3"),
                 dbc.Row([
                     dbc.Col([
-                        dbc.Button("Save as Draft", id="save-event-draft", color="secondary", className="me-2"),
-                        dbc.Button("Send Event", id="send-event", color="success")
+                        dbc.Button([html.I(className="fa fa-save me-2"), "Save as Draft"],
+                                  id="save-event-draft", color="secondary", className="me-2"),
+                        dbc.Button([html.I(className="fa fa-paper-plane me-2"), "Send Event"],
+                                  id="send-event", color="success")
                     ])
-                ])
+                ]),
+                html.Div(id="event-form-feedback", className="mt-3")
             ])
         ], className="shadow-sm mb-4"),
         
+        # Drafts table
         dbc.Card([
-            dbc.CardHeader(html.H5("Upcoming Events", className="mb-0")),
+            dbc.CardHeader(html.H5(f"Drafts ({len(events_draft)})", className="mb-0")),
             dbc.CardBody([
-                html.P("No events scheduled", className="text-center text-muted mb-0")
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Name"), html.Th("Description"), html.Th("Date & Time"),
+                        html.Th("Audience"), html.Th("Status"), html.Th("Actions")
+                    ])),
+                    html.Tbody(draft_rows if draft_rows else [
+                        html.Tr([html.Td("No drafts.", colSpan=6, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
+            ])
+        ], className="shadow-sm mb-4") if events_draft else html.Div(),
+        
+        # Sent / upcoming table
+        dbc.Card([
+            dbc.CardHeader(html.H5(f"Upcoming & Sent Events ({len(events_sent)})", className="mb-0")),
+            dbc.CardBody([
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Name"), html.Th("Description"), html.Th("Date & Time"),
+                        html.Th("Audience"), html.Th("Status")
+                    ])),
+                    html.Tbody(sent_rows if sent_rows else [
+                        html.Tr([html.Td("No events scheduled.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
             ])
         ], className="shadow-sm")
     ])
@@ -1479,16 +1554,56 @@ def get_owner_charges(user_data):
     ])
 
 
-def get_owner_events(user_data):
-    """Owner Events: view society announcements"""
+def _render_events_readonly(user_data, role_filter):
+    """Shared helper: read-only events table filtered by audience role"""
+    soc_id = user_data.get('society_id')
+    events = []
+    if soc_id:
+        try:
+            events = query_db("""
+                SELECT id, title, description, event_date, event_time, audience, status
+                FROM events
+                WHERE society_id = %s AND status = 'sent' AND %s = ANY(audience)
+                ORDER BY event_date DESC, event_time DESC
+            """, (soc_id, role_filter))
+        except Exception as e:
+            print(f"Events readonly error: {e}")
+    
+    rows = []
+    role_colors = {'admin': 'primary', 'apartment': 'success', 'vendor': 'warning', 'security': 'danger'}
+    for ev in events:
+        aud_badges = [dbc.Badge(a.title(), color=role_colors.get(a, 'secondary'), className="me-1")
+                      for a in (ev['audience'] or [])]
+        rows.append(html.Tr([
+            html.Td(ev['title'], className="fw-bold"),
+            html.Td(ev['description'][:100] + '...' if ev['description'] and len(ev['description']) > 100 else (ev['description'] or '-')),
+            html.Td(f"{ev['event_date'] or '-'} {ev['event_time'] or ''}"),
+            html.Td(aud_badges),
+            html.Td(dbc.Badge("Sent", color="success")),
+        ]))
+    
     return html.Div([
         html.H3("Events & Announcements", className="mb-4 fw-light"),
         dbc.Card([
+            dbc.CardHeader(html.H5(f"Events ({len(events)})", className="mb-0")),
             dbc.CardBody([
-                html.P("No upcoming events or announcements for apartment owners.", className="text-muted text-center mb-0")
+                dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("Name"), html.Th("Description"), html.Th("Date & Time"),
+                        html.Th("Audience"), html.Th("Status")
+                    ])),
+                    html.Tbody(rows if rows else [
+                        html.Tr([html.Td("No events or announcements.", colSpan=5, className="text-center text-muted")])
+                    ])
+                ], bordered=True, hover=True, striped=True, responsive=True, className="mb-0")
             ])
         ], className="shadow-sm")
     ])
+
+
+def get_owner_events(user_data):
+    """Owner Events: view society announcements targeted to apartment owners"""
+    return _render_events_readonly(user_data, 'apartment')
 
 
 def get_owner_settings(user_data):
