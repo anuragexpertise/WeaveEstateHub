@@ -41,6 +41,7 @@ app = dash.Dash(
     __name__,
     server=server,
     external_stylesheets=[dbc.themes.FLATLY, dbc.icons.FONT_AWESOME],
+    external_scripts=["https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"],
     suppress_callback_exceptions=True,
     title="WeaveEstateHub - Estate Management"
 )
@@ -70,6 +71,118 @@ def query_db(query, params=(), one=False):
 def execute_db(query, params=()):
     """Execute INSERT/UPDATE/DELETE queries"""
     return query_db(query, params)
+
+# --- Flask API Endpoint for QR Evaluation ---
+from flask import request, jsonify
+
+@server.route('/api/evaluate-qr', methods=['POST'])
+def api_evaluate_qr():
+    """API endpoint called by JS scanner to evaluate a scanned QR code"""
+    try:
+        data = request.get_json()
+        qr_text = data.get('qr_data', '')
+        
+        if not qr_text or not qr_text.startswith('ESTATEHUB|'):
+            return jsonify({"status": "error", "message": "Invalid QR code format"}), 400
+        
+        # Parse QR: ESTATEHUB|APT:5|FLAT:A-101|SOC:1  or  ESTATEHUB|VEN:3|SVC:Plumber|SOC:1
+        parts = {}
+        for segment in qr_text.split('|'):
+            if ':' in segment:
+                key, val = segment.split(':', 1)
+                parts[key] = val
+        
+        soc_id = parts.get('SOC')
+        if not soc_id:
+            return jsonify({"status": "error", "message": "No society in QR data"}), 400
+        
+        # Apartment owner
+        if 'APT' in parts:
+            apt_id = int(parts['APT'])
+            apt = query_db("SELECT * FROM apartments WHERE id = %s AND society_id = %s",
+                           (apt_id, int(soc_id)), one=True)
+            if not apt:
+                return jsonify({"status": "fail", "title": "FAIL",
+                                "name": "Unknown", "detail": "Apartment not found in records",
+                                "entity_type": "apartment"})
+            
+            dues = query_db("""
+                SELECT count(*) as cnt FROM apt_charges_fines
+                WHERE apt_id = %s AND society_id = %s AND apt_status = FALSE
+            """, (apt_id, int(soc_id)), one=True)
+            has_dues = dues['cnt'] > 0 if dues else False
+            
+            if has_dues:
+                return jsonify({
+                    "status": "fail", "title": "FAIL",
+                    "name": apt['owner_name'],
+                    "detail": f"Flat {apt['flat_number']} — {dues['cnt']} unpaid charge(s)",
+                    "entity_type": "apartment"
+                })
+            else:
+                # Auto-log gate access
+                execute_db(
+                    "INSERT INTO gate_access (society_id, role, entity_id, time_in) VALUES (%s, 'A', %s, NOW())",
+                    (int(soc_id), apt_id)
+                )
+                return jsonify({
+                    "status": "pass", "title": "PASS",
+                    "name": apt['owner_name'],
+                    "detail": f"Flat {apt['flat_number']} — No dues. Entry logged.",
+                    "entity_type": "apartment"
+                })
+        
+        # Vendor
+        elif 'VEN' in parts:
+            ven_id = int(parts['VEN'])
+            ven = query_db("SELECT * FROM vendors WHERE id = %s AND society_id = %s",
+                           (ven_id, int(soc_id)), one=True)
+            if not ven:
+                return jsonify({"status": "fail", "title": "FAIL",
+                                "name": "Unknown", "detail": "Vendor not found in records",
+                                "entity_type": "vendor"})
+            
+            dues = query_db("""
+                SELECT count(*) as cnt FROM ven_charges_fines
+                WHERE ven_id = %s AND society_id = %s AND ven_status = FALSE
+            """, (ven_id, int(soc_id)), one=True)
+            has_dues = dues['cnt'] > 0 if dues else False
+            
+            if has_dues:
+                return jsonify({
+                    "status": "fail", "title": "FAIL",
+                    "name": ven['name'],
+                    "detail": f"Service: {ven['service_type']} — {dues['cnt']} unpaid charge(s)",
+                    "entity_type": "vendor"
+                })
+            else:
+                execute_db(
+                    "INSERT INTO gate_access (society_id, role, entity_id, time_in) VALUES (%s, 'V', %s, NOW())",
+                    (int(soc_id), ven_id)
+                )
+                return jsonify({
+                    "status": "pass", "title": "PASS",
+                    "name": ven['name'],
+                    "detail": f"Service: {ven['service_type']} — No dues. Entry logged.",
+                    "entity_type": "vendor"
+                })
+        
+        # Generic user QR
+        elif 'USER' in parts:
+            user_id = int(parts['USER'])
+            role = parts.get('ROLE', 'unknown')
+            return jsonify({
+                "status": "pass", "title": "IDENTIFIED",
+                "name": f"User #{user_id}",
+                "detail": f"Role: {role}. Manual verification recommended.",
+                "entity_type": role
+            })
+        
+        return jsonify({"status": "error", "message": "Unrecognized QR format"}), 400
+        
+    except Exception as e:
+        print(f"QR evaluation API error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Layout Constants ---
 ROLE_CONFIG = {
@@ -777,23 +890,44 @@ def get_events(user_data):
 
 # MODULE 8: Evaluate Pass
 def get_evaluate_pass(user_data):
-    """Evaluate Pass Module - QR Scanner"""
+    """Evaluate Pass Module - QR Camera Scanner + Manual (Admin)"""
     return html.Div([
         html.H3("Evaluate Pass", className="mb-4 fw-light"),
         
         dbc.Row([
             dbc.Col([
+                # QR Camera Scanner
                 dbc.Card([
-                    dbc.CardHeader(html.H5("QR Code Scanner", className="mb-0")),
-                    dbc.CardBody([
+                    dbc.CardHeader([
                         html.Div([
-                            html.I(className="fa fa-qrcode fa-5x text-muted mb-3"),
-                            html.P("Camera-based QR scanning coming soon", className="text-muted"),
-                            html.P("Use manual entry below for now", className="small text-muted")
-                        ], className="text-center p-5 border rounded")
+                            html.H5("QR Code Scanner", className="mb-0 d-inline"),
+                            html.Div([
+                                html.Button([
+                                    html.I(className="fa fa-camera me-2"), "Start Camera"
+                                ], id="admin-qr-start-btn", className="btn btn-success btn-sm me-2"),
+                                html.Button([
+                                    html.I(className="fa fa-stop me-2"), "Stop Camera"
+                                ], id="admin-qr-stop-btn", className="btn btn-outline-danger btn-sm"),
+                            ], className="float-end")
+                        ])
+                    ]),
+                    dbc.CardBody([
+                        html.Div(
+                            id="admin-qr-reader",
+                            children=[
+                                html.Div([
+                                    html.I(className="fa fa-qrcode fa-4x text-muted mb-3"),
+                                    html.P("Click Start Camera to begin scanning", className="text-muted mb-0")
+                                ], className="text-center p-4")
+                            ],
+                            style={"minHeight": "300px", "borderRadius": "8px", "overflow": "hidden",
+                                   "border": "2px dashed #dee2e6"}
+                        ),
+                        html.Div(id="admin-qr-result", className="mt-3")
                     ])
                 ], className="shadow-sm mb-3"),
                 
+                # Manual evaluation
                 dbc.Card([
                     dbc.CardHeader(html.H5("Manual Evaluation", className="mb-0")),
                     dbc.CardBody([
@@ -805,11 +939,14 @@ def get_evaluate_pass(user_data):
                 ], className="shadow-sm")
             ], width=6),
             
+            # Recent Evaluations
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader(html.H5("Recent Evaluations", className="mb-0")),
                     dbc.CardBody([
-                        html.P("No recent evaluations", className="text-center text-muted mb-0")
+                        html.Div(id="qr-recent-evals-admin", children=[
+                            html.P("No recent evaluations", className="text-center text-muted mb-0")
+                        ])
                     ])
                 ], className="shadow-sm")
             ], width=6)
@@ -1756,25 +1893,43 @@ def get_vendor_settings(user_data):
 # ========== SECURITY PORTAL MODULES ==========
 
 def get_security_pass_evaluation(user_data):
-    """Security Pass Evaluation: QR scanner + manual evaluation"""
+    """Security Pass Evaluation: QR Camera Scanner + manual evaluation"""
     return html.Div([
         html.H3("Pass Evaluation", className="mb-4 fw-light"),
         dbc.Row([
             dbc.Col([
+                # QR Camera Scanner
                 dbc.Card([
-                    dbc.CardHeader(html.H5("QR Code Scanner", className="mb-0")),
-                    dbc.CardBody([
+                    dbc.CardHeader([
                         html.Div([
-                            html.I(className="fa fa-qrcode fa-5x text-muted mb-3"),
-                            html.P("Point camera at user's QR code to scan", className="text-muted"),
-                            dbc.Button([
-                                html.I(className="fa fa-camera me-2"),
-                                "Open Camera"
-                            ], id="open-camera-btn", color="primary", size="lg", className="mt-2")
-                        ], className="text-center p-4 border border-dashed rounded")
+                            html.H5("QR Code Scanner", className="mb-0 d-inline"),
+                            html.Div([
+                                html.Button([
+                                    html.I(className="fa fa-camera me-2"), "Start Camera"
+                                ], id="sec-qr-start-btn", className="btn btn-success btn-sm me-2"),
+                                html.Button([
+                                    html.I(className="fa fa-stop me-2"), "Stop Camera"
+                                ], id="sec-qr-stop-btn", className="btn btn-outline-danger btn-sm"),
+                            ], className="float-end")
+                        ])
+                    ]),
+                    dbc.CardBody([
+                        html.Div(
+                            id="sec-qr-reader",
+                            children=[
+                                html.Div([
+                                    html.I(className="fa fa-qrcode fa-4x text-muted mb-3"),
+                                    html.P("Click Start Camera to begin scanning", className="text-muted mb-0")
+                                ], className="text-center p-4")
+                            ],
+                            style={"minHeight": "300px", "borderRadius": "8px", "overflow": "hidden",
+                                   "border": "2px dashed #dee2e6"}
+                        ),
+                        html.Div(id="sec-qr-result", className="mt-3")
                     ])
                 ], className="shadow-sm mb-3"),
                 
+                # Manual evaluation
                 dbc.Card([
                     dbc.CardHeader(html.H5("Manual Evaluation", className="mb-0")),
                     dbc.CardBody([
@@ -1799,11 +1954,12 @@ def get_security_pass_evaluation(user_data):
                 ], className="shadow-sm")
             ], width=6),
             
+            # Recent Evaluations
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader(html.H5("Recent Evaluations", className="mb-0")),
                     dbc.CardBody([
-                        html.Div(id="sec-recent-evals", children=[
+                        html.Div(id="qr-recent-evals-security", children=[
                             html.P("No recent evaluations.", className="text-muted text-center mb-0")
                         ])
                     ])
