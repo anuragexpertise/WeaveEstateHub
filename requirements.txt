@@ -1,0 +1,9 @@
+dash
+dash-bootstrap-components
+flask
+PyJWT
+psycopg2-binary
+python-dotenv
+werkzeug
+pandas
+qrcode
