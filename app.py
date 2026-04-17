@@ -2197,7 +2197,7 @@ def render_secondary_login(society_id, is_master=False):
 # ========== MAIN LAYOUT ==========
 
 app.layout = html.Div([
-    dcc.Location(id="url", refresh=False),
+    dcc.Location(id="url", refresh=True),
     dcc.Store(id="user-session", storage_type="session"),
     dcc.Store(id="auth-stage", data=1),
     html.Div(id="page-content")
@@ -2366,14 +2366,34 @@ def go_to_login(n, soc_id):
 
 # Back to society selection
 @app.callback(
-    Output("auth-stage", "data"),
+    Output("page-content", "children", allow_duplicate=True),
     Input("back-to-stage-1", "n_clicks"),
     prevent_initial_call=True
 )
 def back_to_society(n):
-    """Go back to society selection"""
+    """Go back to society selection by re-rendering page"""
     if n:
-        return 1
+        try:
+            societies = query_db("SELECT id, name FROM societies ORDER BY name")
+            if not societies:
+                return render_secondary_login(society_id=None, is_master=True)
+            options = [{"label": s['name'], "value": s['id']} for s in societies]
+            return dbc.Container([
+                html.Div([
+                    html.Div([
+                        html.Img(src="/assets/logo.svg", height="80px", className="mb-4"),
+                        html.H2("EstateHub", className="text-center mb-2 fw-bold"),
+                        html.P("Estate Management System", className="text-center text-muted mb-4")
+                    ], className="text-center"),
+                    html.Label("Select Your Society", className="fw-bold mb-2"),
+                    dcc.Dropdown(id="society-select", options=options, placeholder="Choose your estate community...", className="mb-4"),
+                    dbc.Button(["Proceed to Login ", html.I(className="fa fa-arrow-right ms-2")],
+                              id="to-stage-2", color="primary", className="w-100", size="lg")
+                ], style={"maxWidth": "500px", "margin": "100px auto", "padding": "50px"},
+                className="bg-white shadow-lg rounded")
+            ], fluid=True, style={"minHeight": "100vh", "backgroundColor": "#f5f7fa", "display": "flex", "alignItems": "center"})
+        except Exception:
+            return dash.no_update
     return dash.no_update
 
 # PIN pad callbacks
