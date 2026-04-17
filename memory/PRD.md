@@ -95,8 +95,15 @@ Create a Dash/Flask webApp 'WeaveEstateHub' - ERP SaaS Application for estate ma
 - [x] Two-stage login with 3 auth methods
 - [x] Role-based routing
 
-### P1 (Important - Next Phase)
-- [ ] Events table in database (currently placeholder)
+### Phase 6: QR Camera Scanner ✅ (Jan 2026)
+- html5-qrcode JS library (CDN) integrated via custom JS bridge
+- Flask API `/api/evaluate-qr` processes scanned QR data
+- Live camera feed on Admin `/evaluate-pass` and Security `/pass-evaluation`
+- Auto-logs to `gate_access` table on PASS
+- Handles: apartment owners, vendors, invalid QR, missing entities
+- Start/Stop camera controls
+- Recent evaluations panel with live updates
+- Manual evaluation fallback still available
 - [ ] CSV import processing logic
 - [ ] File upload handling (logo, background images)
 - [ ] QR camera scanning (currently manual only)

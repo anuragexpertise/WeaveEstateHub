@@ -2900,4 +2900,4 @@ if __name__ == "__main__":
     print("🚀 Starting Dash server on port 8050...")
     print("="*60 + "\n")
     
-    app.run(debug=True, host='0.0.0.0', port=8050)
+    app.run(debug=False, host='0.0.0.0', port=8001)
